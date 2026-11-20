@@ -85,7 +85,7 @@ try:
         ids = [b['box_id'] for b in M.DB['boxes']]
         chk('3 boxes created with RP-YYMMDD-NNNNN ids', len(ids) == 3 and all(re.fullmatch(r'RP-\d{6}-\d{5}', i) for i in ids) and ids[0].endswith('-00001'), ids)
         chk('last box is 20, others 84', [b['qty'] for b in M.DB['boxes']] == [84, 84, 20])
-        chk('print area has 3 labels with all fields', area.count('class="lb"') == 3 and 'RADIANCE POLYMERS' in area and 'ACCEPTED' in area and '20 NOS' in area and 'Unique Code:- ' + ids[0] in area and '/L9' in area, '')
+        chk('print area has 3 labels with all fields', area.count('class="lb"') == 3 and 'RADIANCE POLYMERS' in area and 'ACCEPTED' in area and '20 NOS' in area and 'Unique Code:- L9</div>' in area and 'Unique Code:- ' + ids[0] not in area and ids[0] in area, '')
         d = M.today().split('-'); chk('label date shown dd.mm.yyyy', f'{d[2]}.{d[1]}.{d[0]}' in area)
         chk('part name saved upper-case on label', 'END PLATE' in area)
         chk('confirmation card shown', '3 label(s) created' in txt('#done'))
