@@ -1,7 +1,7 @@
 """Stand-in for Supabase Auth + PostgREST, ONLY to exercise the web app's requests in the sandbox
 (the sandbox cannot reach the real project). It mimics the contract of the real functions; the real
 database logic was tested separately on the live project."""
-import json, re, sys, threading, urllib.parse
+import json, re, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 
@@ -18,10 +18,59 @@ DB = dict(
     profiles={'u-admin': dict(user_id='u-admin', full_name='Bhushan', role='admin', active=True),
               'u-store': dict(user_id='u-store', full_name='Store Man', role='store', active=True),
               'u-fg': dict(user_id='u-fg', full_name='FG Man', role='fg', active=True)},
-    parts={}, packing={}, boxes=[], settings={}, seq=0, log=[], slips={}, parties={}, slipn={},
+    parts={}, packing={}, boxes=[], settings={}, seq=0, log=[], slips={}, parties={}, slipn={}, events=[], evid=0,
 )
-STATS = dict(refresh=0, logins=0, expired=set())
+STATS = dict(refresh=0, logins=0, expired=set(), uid=None, hang=0)   # hang = seconds receive_box takes to answer (a dead connection)
 RES = {'select', 'order', 'limit', 'offset', 'on_conflict'}
+
+
+def ev(box_id, event, uid=None, note=None, at=None, device='web'):
+    DB['evid'] += 1
+    DB['events'].append(dict(id=DB['evid'], box_id=box_id, event=event, at=at or datetime.now(timezone.utc).isoformat(), note=note, by_user=uid, device=device))
+
+
+ist_day = lambda iso: datetime.fromisoformat(iso).astimezone(IST).date().isoformat()
+STATE = dict(CREATED='WIP', OPENING='FG', RECEIVED='FG', DISPATCHED='OUT', VOIDED='VOID', SLIP_VOIDED='FG')
+
+
+def moves():
+    """Same as the SQL view box_moves: each state change of a box and its effect on FG / packed-not-in-FG."""
+    by = {b['box_id']: b for b in DB['boxes']}
+    prev, out = {}, []
+    for e in sorted((e for e in DB['events'] if e['event'] in STATE and e['box_id'] in by), key=lambda e: (e['at'], e['id'])):
+        b = by[e['box_id']]; st = STATE[e['event']]; p = prev.get(e['box_id'], 'NONE'); prev[e['box_id']] = st
+        q = b['qty']
+        out.append(dict(e, day=ist_day(e['at']), part_no=b['part_no'], part_name=b['part_name'], qty=q,
+                        fg_delta=(q if st == 'FG' else 0) - (q if p == 'FG' else 0), wip_delta=(q if st == 'WIP' else 0) - (q if p == 'WIP' else 0),
+                        fg_box_delta=int(st == 'FG') - int(p == 'FG'), wip_box_delta=int(st == 'WIP') - int(p == 'WIP')))
+    return out
+
+
+def stock_ledger(d_from, d_to):
+    days = {}
+    for m in moves():
+        if m['day'] > d_to: continue
+        r = days.setdefault((m['day'], m['part_no']), dict(day=m['day'], part_no=m['part_no'], part_name=m['part_name'], out_q=0, in_q=0, disp_q=0, out_b=0, in_b=0, disp_b=0, fg_d=0, wip_d=0))
+        for ev_, k in (('CREATED', 'out'), ('RECEIVED', 'in'), ('DISPATCHED', 'disp')):
+            if m['event'] == ev_: r[k + '_q'] += m['qty']; r[k + '_b'] += 1
+        r['fg_d'] += m['fg_delta']; r['wip_d'] += m['wip_delta']
+    run_fg, run_wip, out = {}, {}, []
+    for (day, part) in sorted(days):
+        r = days[(day, part)]
+        run_fg[part] = run_fg.get(part, 0) + r['fg_d']; run_wip[part] = run_wip.get(part, 0) + r['wip_d']
+        if d_from <= day <= d_to:
+            out.append(dict(day=day, part_no=part, part_name=r['part_name'], fg_open=run_fg[part] - r['fg_d'], out_qty=r['out_q'], in_qty=r['in_q'], disp_qty=r['disp_q'],
+                            other_qty=r['fg_d'] - r['in_q'] + r['disp_q'], fg_close=run_fg[part], wip_close=run_wip[part], out_boxes=r['out_b'], in_boxes=r['in_b'], disp_boxes=r['disp_b']))
+    return out
+
+
+def stock_as_on(day):
+    acc = {}
+    for m in moves():
+        if m['day'] > day: continue
+        r = acc.setdefault(m['part_no'], dict(part_no=m['part_no'], part_name=m['part_name'], fg_qty=0, fg_boxes=0, wip_qty=0, wip_boxes=0))
+        r['fg_qty'] += m['fg_delta']; r['fg_boxes'] += m['fg_box_delta']; r['wip_qty'] += m['wip_delta']; r['wip_boxes'] += m['wip_box_delta']
+    return [r for _, r in sorted(acc.items()) if r['fg_qty'] or r['wip_qty'] or r['fg_boxes'] or r['wip_boxes']]
 
 
 def role_of(uid):
@@ -47,7 +96,14 @@ def views():
         if x['status'] != 'VOID' and x['source'] == 'LABEL':
             r = out.setdefault((x['label_date'], x['part_no']), dict(day=x['label_date'], shift='A', part_no=x['part_no'], part_name=x['part_name'], boxes=0, qty=0))
             r['boxes'] += 1; r['qty'] += x['qty']
-    return dict(fg_stock_by_part=sorted(fg.values(), key=lambda r: r['part_no']), assembly_out_by_date=list(out.values()), inward_by_date=[], dispatch_by_date=[])
+    inw, dis = {}, {}
+    for x in b:
+        if x['fg_at'] and x['source'] == 'LABEL' and x['status'] in ('FG-RECEIVED', 'DISPATCHED'):
+            k = (ist_day(x['fg_at']), x['part_no']); r = inw.setdefault(k, dict(day=k[0], part_no=x['part_no'], part_name=x['part_name'], boxes=0, qty=0)); r['boxes'] += 1; r['qty'] += x['qty']
+        if x['status'] == 'DISPATCHED' and x.get('out_at'):
+            party = DB['slips'][x['slip_no']]['party']
+            k = (ist_day(x['out_at']), party, x['part_no']); r = dis.setdefault(k, dict(day=k[0], party=party, part_no=x['part_no'], part_name=x['part_name'], boxes=0, qty=0)); r['boxes'] += 1; r['qty'] += x['qty']
+    return dict(fg_stock_by_part=sorted(fg.values(), key=lambda r: r['part_no']), assembly_out_by_date=list(out.values()), inward_by_date=list(inw.values()), dispatch_by_date=list(dis.values()))
 
 
 def table_rows(t):
@@ -58,6 +114,12 @@ def table_rows(t):
     if t == 'boxes': return DB['boxes']
     if t == 'parties': return sorted(DB['parties'].values(), key=lambda r: r['name'])
     if t == 'slips': return list(DB['slips'].values())
+    if t == 'box_trace':
+        by = {b['box_id']: b for b in DB['boxes']}
+        admin = role_of(STATS['uid']) == 'admin'
+        return [dict(e, day=ist_day(e['at']), by_name=(DB['profiles'].get(e['by_user']) or {}).get('full_name') if admin else None,
+                     part_no=by[e['box_id']]['part_no'], part_name=by[e['box_id']]['part_name'], qty=by[e['box_id']]['qty']) for e in DB['events'] if e['box_id'] in by]
+    if t == 'box_moves': return moves()
     if t == 'slip_summary':
         out = []
         for sl in DB['slips'].values():
@@ -78,6 +140,9 @@ def matches(row, key, spec):
     if op == 'eq': return str(v).lower() == arg.lower()
     if op == 'gte': return v is not None and str(v) >= arg
     if op == 'lte': return v is not None and str(v) <= arg
+    if op == 'in': return str(v) in arg.strip('()').split(',')
+    if op == 'lt': return v is not None and str(v) < arg
+    if op == 'gt': return v is not None and str(v) > arg
     if op == 'ilike':
         rx = '^' + re.escape(arg).replace(r'\*', '.*') + '$'
         return re.match(rx, str(v or ''), re.I) is not None
@@ -92,6 +157,7 @@ def new_box(part, name, qty, status, source, user, lot, date, pp, tray, qa=''):
     b = dict(seq=s, box_id=bid, part_no=part, part_name=name, qty=qty, status=status, source=source, shift='A', qa_sign=qa, lot=lot,
              label_date=date, pp_box_code=pp, tray_no=tray, rack=None, slip_no=None, created_at=now, fg_at=now if status == 'FG-RECEIVED' else None, fg_by=user if status == 'FG-RECEIVED' else None, out_at=None)
     DB['boxes'].append(b)
+    ev(bid, 'CREATED' if source == 'LABEL' else 'OPENING', user, at=now)
     return b
 
 
@@ -119,6 +185,7 @@ def rpc(fn, a, uid):
         return rows
     if fn == 'reprint_boxes':
         need('assembly', 'admin')
+        for i in a['p_box_ids']: ev(i, 'REPRINTED', uid)
         return [b for b in DB['boxes'] if b['box_id'] in a['p_box_ids']]
     if fn == 'void_box':
         need('assembly', 'admin')
@@ -126,7 +193,7 @@ def rpc(fn, a, uid):
         if not b: return dict(ok=False, msg='Box not found')
         if b['status'] not in ('WIP-PACKED', 'FG-RECEIVED'): return dict(ok=False, msg='Cannot void a box that is ' + b['status'])
         if not (a.get('p_reason') or '').strip(): raise Err(400, 'Reason is required', 'P0001')
-        b['status'] = 'VOID'
+        b['status'] = 'VOID'; ev(b['box_id'], 'VOIDED', uid, a['p_reason'].strip())
         return dict(ok=True)
     if fn == 'receive_box':
         need('store', 'fg', 'admin')
@@ -134,7 +201,14 @@ def rpc(fn, a, uid):
         rack = (a.get('p_rack') or '').strip() or None
         b = next((x for x in DB['boxes'] if x['box_id'] == bid), None)
         if b and b['status'] == 'WIP-PACKED':
-            b.update(status='FG-RECEIVED', fg_at=datetime.now(timezone.utc).isoformat(), fg_by=uid, rack=rack)
+            # same rules as 007_offline_scan_time.sql: the phone's scan time is believed only if it is not in the future and not older than 7 days,
+            # and a box is never received before its label was printed
+            now = datetime.now(timezone.utc); at = now
+            if a.get('p_scanned_at'):
+                t = datetime.fromisoformat(str(a['p_scanned_at']).replace('Z', '+00:00'))
+                if now - timedelta(days=7) <= t <= now: at = t
+            made = datetime.fromisoformat(b['created_at'].replace('Z', '+00:00')) if b.get('created_at') else at
+            b.update(status='FG-RECEIVED', fg_at=max(at, made).isoformat(), fg_by=uid, rack=rack); ev(bid, 'RECEIVED', uid, rack, at=b['fg_at'])
             return dict(ok=True, msg=f"{bid} received · {b['part_no']} {b['part_name']} · {b['qty']} pcs",
                         box=dict(box_id=bid, part_no=b['part_no'], part_name=b['part_name'], qty=b['qty'], rack=rack, fg_at=b['fg_at']))
         if not b: return dict(ok=False, msg=bid + ': not in register')
@@ -168,7 +242,7 @@ def rpc(fn, a, uid):
                                disp_exe=g('p_disp_exe'), driver_name=g('p_driver_name'), driver_mob=g('p_driver_mob'), created_at=datetime.now(timezone.utc).isoformat(), created_by=uid, voided_at=None)
         q = 0
         for b in DB['boxes']:
-            if b['box_id'] in ids: b.update(status='DISPATCHED', slip_no=no, out_at=datetime.now(timezone.utc).isoformat(), out_by=uid); q += b['qty']
+            if b['box_id'] in ids: b.update(status='DISPATCHED', slip_no=no, out_at=datetime.now(timezone.utc).isoformat(), out_by=uid); q += b['qty']; ev(b['box_id'], 'DISPATCHED', uid, no, at=b['out_at'])
         DB['parties'][party] = dict(name=party, location=g('p_location'), transport=g('p_transport'), disp_exe=g('p_disp_exe'), driver_name=g('p_driver_name'), driver_mob=g('p_driver_mob'))
         return dict(ok=True, slip_no=no, boxes=len(ids), qty=q)
     if fn == 'void_slip':
@@ -180,8 +254,14 @@ def rpc(fn, a, uid):
         if sl.get('voided_at'): return dict(ok=False, msg=no + ': already voided')
         live = [b for b in DB['boxes'] if b['slip_no'] == no and b['status'] == 'DISPATCHED']
         sl.update(voided_at=datetime.now(timezone.utc).isoformat(), void_reason=reason, void_boxes=len(live), void_qty=sum(b['qty'] for b in live))
-        for b in live: b.update(status='FG-RECEIVED', slip_no=None, out_at=None, out_by=None)
+        for b in live: b.update(status='FG-RECEIVED', slip_no=None, out_at=None, out_by=None); ev(b['box_id'], 'SLIP_VOIDED', uid, f'{no}: {reason}')
         return dict(ok=True, msg=f'{no} voided · {len(live)} boxes back in FG stock', boxes=len(live), qty=sl['void_qty'])
+    if fn == 'stock_ledger':
+        need('assembly', 'store', 'dispatch', 'fg', 'viewer', 'admin')
+        return stock_ledger(a['p_from'], a['p_to'])
+    if fn == 'stock_as_on':
+        need('assembly', 'store', 'dispatch', 'fg', 'viewer', 'admin')
+        return stock_as_on(a['p_day'])
     if fn == 'admin_list_users':
         need('admin')
         return [dict(user_id=v['id'], email=e, full_name=(DB['profiles'].get(v['id']) or {}).get('full_name'), role=(DB['profiles'].get(v['id']) or {}).get('role'),
@@ -226,11 +306,18 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
 
     def body(self):
-        n = int(self.headers.get('Content-Length') or 0)
-        return json.loads(self.rfile.read(n) or b'null') if n else None
+        # Read once per request. The body must always be consumed, even when we answer 401/403 straight away,
+        # otherwise the unread bytes corrupt the next request on the same keep-alive connection (a POST then fails with ERR_FAILED).
+        if not self._body_read:
+            n = int(self.headers.get('Content-Length') or 0)
+            self._body = json.loads(self.rfile.read(n) or b'null') if n else None
+            self._body_read = True
+        return self._body
 
     def handle_any(self, method):
+        self._body_read = False
         try:
+            self.body()
             u = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
             if not self.headers.get('apikey'): raise Err(401, 'No API key found in request', 'PGRST301')
@@ -249,9 +336,10 @@ class H(BaseHTTPRequestHandler):
             if not u.path.startswith('/rest/v1/'): raise Err(404, 'not found')
             tok = (self.headers.get('Authorization') or '').replace('Bearer ', '')
             if not tok.startswith('at.') or tok in STATS['expired']: raise Err(401, 'JWT expired', 'PGRST301')
-            uid = tok.split('.')[1]
+            uid = tok.split('.')[1]; STATS['uid'] = uid
             name = u.path[len('/rest/v1/'):]
             if name.startswith('rpc/'):
+                if name == 'rpc/receive_box' and STATS.get('hang'): time.sleep(STATS['hang'])
                 res = rpc(name[4:], self.body() or {}, uid)
                 return self.send(200, res)
             if role_of(uid) is None and name != 'profiles': return self.send(200, [])   # RLS: no role sees nothing
@@ -298,6 +386,8 @@ class H(BaseHTTPRequestHandler):
             raise Err(405, 'unsupported')
         except Err as e:
             self.send(e.status, dict(message=e.message, code=e.code))
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # the browser gave up waiting (time-out) before we answered
 
     def session(self, email, uid):
         return dict(access_token=f'at.{uid}.{STATS["logins"]}.{STATS["refresh"]}', refresh_token=f'rt.{uid}.x', expires_in=3600,

@@ -50,7 +50,7 @@ try:
         pg.click('#signout'); pg.wait_for_selector('#lf')
         pg.fill('#em', 'admin@x.com'); pg.fill('#pw', 'secret'); pg.click('#go'); pg.wait_for_selector('.top nav')
         nav = [a.inner_text() for a in pg.query_selector_all('.top nav a')]
-        chk('admin sees every page', nav == ['Home', 'FG inward', 'FG outward', 'Slips', 'Print labels', 'Box register', 'Reports', 'Parts', 'Opening stock', 'Users'], nav)
+        chk('admin sees every page', nav == ['Home', 'FG inward', 'FG outward', 'Slips', 'Print labels', 'Box register', 'Reports', 'Stock take', 'Parts', 'Opening stock', 'Parallel run', 'Users'], nav)
         chk('header shows name and role', 'Bhushan · admin' in txt('.who'))
         pg.wait_for_selector('.stat'); chk('home loads with stats', 'FG stock NOS' in txt())
         chk('admin sees "Upload opening stock" button on Home', 'Opening stock not uploaded yet' in txt() and pg.query_selector('a.btn[href="#/opening"]') is not None)
@@ -135,7 +135,9 @@ try:
 
         # ---------------- reports + home
         go('reports'); pg.wait_for_selector('#out table')
-        o = txt('#out'); chk('assembly-out per day excludes the voided box (2 boxes, 104)', 'TOTAL' in o and '104' in o and '188' not in o, o[:120].replace('\n', ' '))
+        o = txt('#out'); chk('Reports opens on the Day summary: today printed 188, voided 84, packed 104', 'TOTAL' in o and '188' in o and '84' in o and '104' in o, o.replace('\n', ' | ')[:700])
+        go('reports?tab=detail'); pg.wait_for_selector('#out table')
+        o = txt('#out'); chk('per-date list: assembly-out excludes the voided box (2 boxes, 104)', 'TOTAL' in o and '104' in o and '188' not in o, o[:120].replace('\n', ' '))
         with pg.expect_download() as dl: pg.click('#csv')
         chk('report CSV downloads', dl.value.suggested_filename.startswith('assembly_out_by_date'))
         go(''); pg.wait_for_selector('.stat'); chk('home shows 104 packed NOS and 104 assembly out today', txt().count('104') >= 2)
@@ -187,7 +189,7 @@ try:
         # ---------------- storeman: limited UI, server refuses
         pg.click('#signout'); pg.wait_for_selector('#lf'); pg.fill('#em', 'store@x.com'); pg.fill('#pw', 'secret'); pg.click('#go'); pg.wait_for_selector('.top nav')
         nav = [a.inner_text() for a in pg.query_selector_all('.top nav a')]
-        chk('store role sees Home / FG inward / Slips / Box register / Reports', nav == ['Home', 'FG inward', 'Slips', 'Box register', 'Reports'], nav)
+        chk('store role sees Home / FG inward / Slips / Box register / Reports / Stock take', nav == ['Home', 'FG inward', 'Slips', 'Box register', 'Reports', 'Stock take'], nav)
         go('print'); pg.wait_for_selector('.stat'); chk('store opening #/print lands on Home', 'Today' in txt('h1'))
         go('register'); pg.wait_for_selector('#out table'); chk('store has no Void buttons or tick boxes', pg.query_selector('[data-void]') is None and pg.query_selector('.sel') is None)
         res = pg.evaluate("""async () => { const api = await import('./js/api.js'); try { await api.rpc('create_boxes', {p_part_no:'X', p_part_name:'x', p_std_qty:1, p_n:1}); return 'ALLOWED'; } catch (e) { return e.message; } }""")

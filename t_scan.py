@@ -146,10 +146,14 @@ try:
         chk('list is loaded from the database after reload (3 rows: D, B, A)', len(rows) == 3, len(rows))
 
         # no connection
+        E = M.new_box('5017886', 'BRACKET RH', 75, 'WIP-PACKED', 'LABEL', 'u-admin', '9E2602C', M.today(), 'PP-1', 'T-1', 'MS. PATIL')
         pg.route('**/rest/v1/rpc/receive_box', lambda r: r.abort())
-        pg.fill('#typed', 'RP-261101-00001'); pg.click('#typedgo'); pg.wait_for_selector('#result.bad')
-        chk('no connection -> says NOT saved', 'NOT saved' in txt('#result'), txt('#result'))
+        pg.fill('#typed', E['box_id']); pg.click('#typedgo'); pg.wait_for_selector('#result.warn')
+        chk('no connection -> amber "Saved on this phone" (not lost, not received yet)', 'Saved on this phone' in txt('#result') and E['status'] == 'WIP-PACKED', txt('#result'))
+        chk('no connection -> the box is listed as waiting', pg.is_visible('#qcard') and E['box_id'] in txt('#qlist'))
         pg.unroute('**/rest/v1/rpc/receive_box')
+        pg.click('#sendnow'); wait_js(pg, "document.querySelector('#qcard').hidden", 10)
+        chk('connection back -> "Send now" delivers it and the list empties', E['status'] == 'FG-RECEIVED' and E['fg_by'] == 'u-store')
 
         # a role that may not receive
         pg.click('#signout'); pg.wait_for_selector('#lf'); pg.fill('#em', 'new@x.com'); pg.fill('#pw', 'secret'); pg.click('#go'); pg.wait_for_selector('.top nav')

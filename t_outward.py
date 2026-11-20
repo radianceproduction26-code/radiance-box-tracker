@@ -66,7 +66,7 @@ try:
 
         pg.goto(BASE); login('fg@x.com')
         nav = [a.inner_text() for a in pg.query_selector_all('.top nav a')]
-        chk('FG store role sees inward AND outward', nav == ['Home', 'FG inward', 'FG outward', 'Slips', 'Box register', 'Reports'], nav)
+        chk('FG store role sees inward AND outward', nav == ['Home', 'FG inward', 'FG outward', 'Slips', 'Box register', 'Reports', 'Stock take'], nav)
         go('outward'); pg.wait_for_selector('#f_party')
         chk('outward page opens, create button disabled when empty', pg.is_disabled('#create'))
 
