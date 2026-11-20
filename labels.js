@@ -18,7 +18,7 @@ const CELL = `background:#fff;border-right:${LINE};border-bottom:${LINE};min-wid
 const cell = (cls, inner, extra = '') => `<div${cls ? ` class="${cls}"` : ''} style="${CELL}${extra}">${inner}</div>`;
 
 export function labelHtml(b) {
-  const uc = `${esc(b.box_id)}/${dmy(b.label_date)}${b.lot ? '/' + esc(b.lot) : ''}`;
+  const uc = esc(b.lot || '');   // Unique Code = the Lot / batch code typed by the user when the labels were made (the Box ID is printed in its own place, with the QR)
   return `<div class="lb" style="${BOX}">
 ${cell('h', 'RADIANCE POLYMERS', ';grid-column:1/3')}${cell('ac', 'ACCEPTED')}
 ${cell('uc', `Unique Code:- ${uc}`)}
