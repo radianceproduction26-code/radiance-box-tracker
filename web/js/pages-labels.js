@@ -39,8 +39,9 @@ export async function printPage(el, { me, isCurrent }) {
       <div><label for="qa">QA sign</label><input id="qa" value="${esc(me.full_name)}"></div>
     </div>
     <p class="hint" id="sum"></p>
-    <div class="actions"><button class="btn" id="go">Create and print labels</button></div>
+    <div class="actions"><button class="btn" id="go">Review labels</button></div>
   </form>
+  <div id="review"></div>
   <div id="done"></div>`;
 
   const f = (id) => $(el, '#' + id);
@@ -73,22 +74,71 @@ export async function printPage(el, { me, isCurrent }) {
   el.addEventListener('click', (e) => { const c = e.target.closest('.chip[data-std]'); if (c) { f('std').value = c.dataset.std; sum(); } });
   ['std', 'n', 'last'].forEach((id) => f(id).addEventListener('input', sum));
 
+  // Step 1: the form only REVIEWS. Nothing is saved until "Create and print labels" is pressed on the review card.
   $(el, '#f').addEventListener('submit', (ev) => {
     ev.preventDefault();
-    busy(f('go'), async () => {
-      const n = +f('n').value;
+    showReview();
+  });
+
+  function closeReview() {
+    $(el, '#review').innerHTML = '';
+    $(el, '#f').style.display = '';
+    $(el, '#done').style.display = '';
+  }
+
+  // Shows the label(s) as they will be made (the database also trims the text and makes name and lot UPPER CASE).
+  // The Box ID and QR are given only when the label is created.
+  function showReview() {
+    const part = cleanPart(f('part').value), name = f('name').value.trim().toUpperCase();
+    const std = +f('std').value, n = +f('n').value, lastq = f('last').value ? +f('last').value : 0;
+    const lot = f('lot').value.trim().toUpperCase(), date = f('date').value, qa = f('qa').value.trim();
+    if (!part) return toast('Part no is required.', true);
+    const total = lastq ? std * (n - 1) + lastq : std * n;
+    const mk = (qty) => ({ box_id: 'NEW', part_no: part, part_name: name, qty, lot, label_date: date, qa_sign: qa });
+    const shown = [mk(n === 1 && lastq ? lastq : std)];
+    if (n > 1 && lastq && lastq !== std) shown.push(mk(lastq));
+
+    const warns = [];
+    if (!name) warns.push('Part name is empty.');
+    if (!lot) warns.push('Lot / batch is empty, so "Unique Code" on the label will be blank.');
+    if (!qa) warns.push('QA sign is empty.');
+    if (lastq > std) warns.push(`Last box qty (${fmtNum(lastq)}) is more than qty per box (${fmtNum(std)}).`);
+
+    const rows = [
+      { a: 'Part no', b: part }, { a: 'Part name', b: name || '-' },
+      { a: 'Qty per box', b: `${fmtNum(std)} NOS` }, { a: 'Number of boxes', b: fmtNum(n) },
+      { a: 'Last box qty', b: lastq ? `${fmtNum(lastq)} NOS` : 'same as above' }, { a: 'Total', b: `${fmtNum(total)} NOS` },
+      { a: 'Lot / batch (Unique Code)', b: lot || '-' }, { a: 'Date', b: dmy(date) }, { a: 'QA sign', b: qa || '-' },
+    ];
+    $(el, '#review').innerHTML = `<div class="card">
+      <h2>Check the label before it is created</h2>
+      <p class="hint" style="margin:0 0 12px">Nothing is saved yet. If anything is wrong, press <b>Back and correct</b>.</p>
+      ${warns.length ? msg('warn', `<b>Please check</b><ul>${warns.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>`) : ''}
+      <div style="display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:8px 18px;margin:0 0 14px;font-size:14.5px">${rows.map((r) => `<div style="color:var(--mute)">${esc(r.a)}</div><div style="font-weight:600;overflow-wrap:anywhere">${esc(r.b)}</div>`).join('')}</div>
+      <p class="hint">${fmtNum(n)} label(s) will be made. ${shown.length > 1 ? 'Preview of the first and the last label.' : n > 1 ? 'All labels are the same except the Box ID.' : 'Preview of the label.'} The Box ID and QR are given when it is created.</p>
+      <div class="preview">${labelsHtml(shown)}</div>
+      <div class="actions"><button type="button" class="btn alt" id="back">Back and correct</button><button type="button" class="btn" id="create">Create and print labels</button></div>
+    </div>`;
+    $(el, '#f').style.display = 'none';
+    $(el, '#done').style.display = 'none';
+    fitLabels($(el, '#review'));
+    window.scrollTo(0, 0);
+
+    $(el, '#back').addEventListener('click', () => { closeReview(); window.scrollTo(0, 0); });
+    $(el, '#create').addEventListener('click', (e) => busy(e.target, async () => {
       if (n > 20 && !confirm(`Create ${n} labels?`)) return;
-      const rows = await api.rpc('create_boxes', {
+      const made = await api.rpc('create_boxes', {
         p_part_no: f('part').value, p_part_name: f('name').value, p_std_qty: +f('std').value, p_n: n,
         p_last_qty: f('last').value ? +f('last').value : null, p_lot: f('lot').value, p_label_date: f('date').value,
         p_qa_sign: f('qa').value, p_device: CONFIG.DEVICE,
       });
-      last = rows;
-      partMap.set(rows[0].part_no, { part_no: rows[0].part_no, name: rows[0].part_name, std_qty: +f('std').value });
+      last = made;
+      partMap.set(made[0].part_no, { part_no: made[0].part_no, name: made[0].part_name, std_qty: +f('std').value });
+      closeReview();
       showDone();
-      printLabels(rows);
-    });
-  });
+      printLabels(made);
+    }));
+  }
 
   function showDone() {
     const first = last[0].box_id, lastId = last[last.length - 1].box_id;
