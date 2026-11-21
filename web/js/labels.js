@@ -9,14 +9,22 @@ export function dmy(iso) {
   return m ? `${m[3]}.${m[2]}.${m[1]}` : esc(iso || '');
 }
 
+// The lines of the label are REAL borders written straight into each label (not taken from the style sheet, and not a background colour).
+// So they print whatever the browser's "Background graphics" option says, and even if an old copy of app.css is still cached.
+// 3 px = 0.8 mm = about 6 dots on a 203 dpi label printer. (Chrome rounds border widths to whole pixels.)
+const LINE = '3px solid #000';
+const BOX = `box-sizing:border-box;gap:0;padding:0;background:#fff;border-top:${LINE};border-left:${LINE};-webkit-print-color-adjust:exact;print-color-adjust:exact`;
+const CELL = `background:#fff;border-right:${LINE};border-bottom:${LINE};min-width:0`;
+const cell = (cls, inner, extra = '') => `<div${cls ? ` class="${cls}"` : ''} style="${CELL}${extra}">${inner}</div>`;
+
 export function labelHtml(b) {
-  const uc = `${esc(b.box_id)}/${dmy(b.label_date)}${b.lot ? '/' + esc(b.lot) : ''}`;
-  return `<div class="lb">
-<div class="h" style="grid-column:1/3">RADIANCE POLYMERS</div><div class="ac">ACCEPTED</div>
-<div class="uc">Unique Code:- ${uc}</div>
-<div>Part No:-</div><div class="v">${esc(b.part_no)}</div><div class="bid"><span>BOX ID</span><b>${esc(b.box_id)}</b></div>
-<div>Part Name:-</div><div class="v">${esc(b.part_name)}</div><div>QTY :-</div><div class="v">${esc(b.qty)} NOS</div><div class="qr">${qrSvg(b.box_id, 2)}</div>
-<div>Date:-</div><div class="v">${dmy(b.label_date)}</div><div>QA Sign:-</div><div class="v">${esc(b.qa_sign)}</div></div>`;
+  const uc = esc(b.lot || '');   // Unique Code = the Lot / batch code typed by the user when the labels were made (the Box ID is printed in its own place, with the QR)
+  return `<div class="lb" style="${BOX}">
+${cell('h', 'RADIANCE POLYMERS', ';grid-column:1/3')}${cell('ac', 'ACCEPTED')}
+${cell('uc', `Unique Code:- ${uc}`)}
+${cell('', 'Part No:-')}${cell('v', esc(b.part_no))}${cell('bid', `<span>BOX ID</span><b>${esc(b.box_id)}</b>`)}
+${cell('', 'Part Name:-')}${cell('v', esc(b.part_name))}${cell('', 'QTY :-')}${cell('v', `${esc(b.qty)} NOS`)}${cell('qr', qrSvg(b.box_id, 2))}
+${cell('', 'Date:-')}${cell('v', dmy(b.label_date))}${cell('', 'QA Sign:-')}${cell('v', esc(b.qa_sign))}</div>`;
 }
 
 export const labelsHtml = (rows) => rows.map(labelHtml).join('');
@@ -24,7 +32,7 @@ export const labelsHtml = (rows) => rows.map(labelHtml).join('');
 // Measured fit: long part names, lots or QA names are shrunk (then wrapped onto two lines) until nothing is cut off.
 // Must run while the labels are laid out (not display:none).
 export function fitLabels(root) {
-  const over = (d) => d.scrollWidth > d.clientWidth + 1 || d.scrollHeight > d.clientHeight + 1;
+  const over = (d, room = 0) => d.scrollWidth > d.clientWidth + 1 || d.scrollHeight > d.clientHeight + 1 - room;   // room: px of free space wanted above/below wrapped text, so it never touches the lines
   root.querySelectorAll('.lb > .v, .lb > .uc').forEach((d) => {
     if (!over(d)) return;
     const base = parseFloat(getComputedStyle(d).fontSize) * 0.75;      // px -> pt
@@ -34,7 +42,7 @@ export function fitLabels(root) {
     if (over(d) && d.classList.contains('v')) {                          // 2) two lines
       d.style.whiteSpace = 'normal'; d.style.overflowWrap = 'anywhere'; d.style.lineHeight = '1.05';
       s = Math.min(base, 10.5); set();
-      while (over(d) && s > 6) { s -= 0.5; set(); }
+      while (over(d, 5) && s > 6) { s -= 0.5; set(); }
     }
   });
 }
