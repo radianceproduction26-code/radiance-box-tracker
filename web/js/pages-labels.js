@@ -38,6 +38,7 @@ export async function printPage(el, { me, isCurrent }) {
       <div><label for="date">Date</label><input id="date" type="date" required value="${todayIst()}"></div>
       <div><label for="qa">QA sign</label><input id="qa" value="${esc(me.full_name)}"></div>
     </div>
+    <p class="hint" id="filled" hidden></p>
     <p class="hint" id="sum"></p>
     <div class="actions"><button class="btn" id="go">Review labels</button></div>
   </form>
@@ -55,6 +56,7 @@ export async function printPage(el, { me, isCurrent }) {
   let autoName = '', shown = '';
   const onPart = () => {
     const key = cleanPart(f('part').value);
+    if (key && key !== filledKey) clearAuto();
     const p = partMap.get(key);
     if (p && (f('name').value === '' || f('name').value === autoName)) { f('name').value = p.name; autoName = p.name; }
     const list = packMap.get(key) || [];
@@ -68,11 +70,48 @@ export async function printPage(el, { me, isCurrent }) {
     if (list.length === 1 && !f('std').value) f('std').value = list[0].std_qty;
     else if (p && p.std_qty && !f('std').value) f('std').value = p.std_qty;
     sum();
+    autoFill(key);
   };
   f('part').addEventListener('change', onPart);
   f('part').addEventListener('input', () => { if (partMap.has(cleanPart(f('part').value))) onPart(); });
   el.addEventListener('click', (e) => { const c = e.target.closest('.chip[data-std]'); if (c) { f('std').value = c.dataset.std; sum(); } });
   ['std', 'n', 'last'].forEach((id) => f(id).addEventListener('input', sum));
+
+  // When a part no is entered, the form is filled from the LAST batch of labels made for that part
+  // (name, qty per box, number of boxes, last box qty, lot, QA sign). The date stays today's date.
+  // Anything the user has already typed or clicked for this part is never overwritten.
+  const touched = new Set(), autoSet = new Set();
+  let filledKey = '', fillSeq = 0;
+  ['name', 'std', 'n', 'last', 'lot', 'qa'].forEach((id) => f(id).addEventListener('input', () => { touched.add(id); autoSet.delete(id); }));
+  // A different part no: take back what the previous part's last label filled in (never what the user typed), so no old value is left behind.
+  function clearAuto() {
+    const dflt = { std: '', n: '1', last: '', lot: '', qa: me.full_name };
+    autoSet.forEach((id) => { if (!touched.has(id)) f(id).value = dflt[id]; });
+    autoSet.clear();
+    if (autoName && f('name').value === autoName && !touched.has('name')) f('name').value = '';
+  }
+  el.addEventListener('click', (e) => { if (e.target.closest('.chip[data-std]')) touched.add('std'); });
+  const note = (text) => { f('filled').textContent = text; f('filled').hidden = !text; };
+  async function autoFill(key) {
+    if (!key || key === filledKey) return;
+    filledKey = key; touched.clear(); note('');
+    const mine = ++fillSeq;
+    let rows = [];
+    try {
+      rows = (await api.selectPage('boxes', `select=box_id,part_name,qty,lot,qa_sign,label_date,created_at,seq&part_no=eq.${encodeURIComponent(key)}&source=eq.LABEL&order=seq.desc`, 0, 199)).rows;
+    } catch (e) { return; }                                   // no network or no access: the form simply stays as it is
+    if (mine !== fillSeq || !isCurrent() || cleanPart(f('part').value) !== key) return;
+    if (!rows.length) return;
+    const top = rows[0];
+    const batch = rows.filter((r) => r.created_at === top.created_at).sort((x, y) => x.seq - y.seq);   // one "create" press = one batch
+    const n = batch.length, std = batch[0].qty, lastq = n > 1 && batch[n - 1].qty !== std ? batch[n - 1].qty : '';
+    const put = (id, v) => { if (!touched.has(id)) { f(id).value = v; autoSet.add(id); } };
+    if (top.part_name && !touched.has('name')) { f('name').value = top.part_name; autoName = top.part_name; }
+    put('std', std); put('n', n); put('last', lastq); put('lot', top.lot || '');
+    if (top.qa_sign) put('qa', top.qa_sign);
+    sum();
+    note(`Filled from the last label made for this part (${batch[0].box_id}${n > 1 ? ' to ' + batch[n - 1].box_id : ''}, ${dmy(top.label_date)}): ${n} box(es) x ${fmtNum(std)}${lastq ? ', last box ' + fmtNum(lastq) : ''}, lot ${top.lot || '-'}, QA ${top.qa_sign || '-'}. Date is today. Change anything that is different.`);
+  }
 
   // Step 1: the form only REVIEWS. Nothing is saved until "Create and print labels" is pressed on the review card.
   $(el, '#f').addEventListener('submit', (ev) => {
